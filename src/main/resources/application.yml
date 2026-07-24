@@ -5,6 +5,7 @@ spring:
     name: EXE_project
   data:
     mongodb:
+      uri: ${MONGO_URI:}
       database: ${MONGO_DATABASE:EXE_project}
 
 server:
@@ -15,6 +16,7 @@ server:
 app:
   frontend-url: ${FRONTEND_URL:http://localhost:3000}
   mongo:
+    uri: ${MONGO_URI:}
     database: ${MONGO_DATABASE:EXE_project}
     root-username: ${MONGO_ROOT_USERNAME:}
     root-password: ${MONGO_ROOT_PASSWORD:}
