@@ -148,8 +148,7 @@ public class TournamentService {
                     PaymentPurpose.TOURNAMENT_ENTRY,
                     registration.getId(),
                     tournament.getEntryFee(),
-                    "Tournament entry fee - " + tournament.getTitle(),
-                    servletRequest.getRemoteAddr()
+                    "Tournament entry fee - " + tournament.getTitle()
             );
             registration.setPaymentId(payment.getId());
             registrationRepository.save(registration);

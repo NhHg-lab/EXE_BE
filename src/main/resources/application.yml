@@ -24,12 +24,17 @@ app:
   jwt:
     secret: ${JWT_SECRET:change-this-dev-secret-change-this-dev-secret}
     expiration-ms: ${JWT_EXPIRATION_MS:86400000}
-  vnpay:
-    tmn-code: ${VNPAY_TMN_CODE:}
-    hash-secret: ${VNPAY_HASH_SECRET:}
-    pay-url: ${VNPAY_PAY_URL:https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}
-    return-url: ${VNPAY_RETURN_URL:http://localhost:3000/vnpay-return}
-    ipn-url: ${VNPAY_IPN_URL:http://localhost:8080/api/payments/vnpay/ipn}
+  momo:
+    partner-code: ${MOMO_PARTNER_CODE:}
+    access-key: ${MOMO_ACCESS_KEY:}
+    secret-key: ${MOMO_SECRET_KEY:}
+    create-url: ${MOMO_CREATE_URL:https://test-payment.momo.vn/v2/gateway/api/create}
+    redirect-url: ${MOMO_REDIRECT_URL:http://localhost:3000/momo-result}
+    ipn-url: ${MOMO_IPN_URL:http://localhost:8080/api/v1/payments/momo/ipn}
+    request-type: ${MOMO_REQUEST_TYPE:captureWallet}
+    lang: ${MOMO_LANG:vi}
+    simulator-enabled: ${MOMO_SIMULATOR_ENABLED:false}
+    simulator-url: ${MOMO_SIMULATOR_URL:http://localhost:3000/momo-simulator}
 
 logging:
   level:
