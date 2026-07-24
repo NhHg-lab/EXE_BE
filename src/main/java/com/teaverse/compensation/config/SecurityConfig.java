@@ -34,7 +34,14 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/auth/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/tournaments/**", "/clans/**", "/posts/**", "/listings/**").permitAll()
-                        .requestMatchers("/payments/vnpay/return", "/payments/vnpay/ipn").permitAll()
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/v1/payments/momo/result"
+                        ).permitAll()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/v1/payments/momo/ipn"
+                        ).permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

@@ -138,11 +138,12 @@ public class DtoMapper {
                 payment.getPurpose(),
                 payment.getReferenceId(),
                 payment.getAmount(),
-                payment.getStatus(),
-                payment.getProvider(),
-                payment.getTransactionRef(),
-                payment.getPaymentUrl()
-        );
+                  payment.getStatus(),
+                  payment.getProvider(),
+                  payment.getTransactionRef(),
+                  payment.getProviderRequestId(),
+                  payment.getPaymentUrl()
+          );
     }
 
     public NotificationResponse toNotificationResponse(Notification notification) {

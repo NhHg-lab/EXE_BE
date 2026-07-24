@@ -21,8 +21,9 @@ public class Payment {
     private String referenceId;
     private BigDecimal amount = BigDecimal.ZERO;
     private PaymentStatus status = PaymentStatus.PENDING;
-    private String provider = "VNPAY";
+    private String provider = "MOMO";
     private String transactionRef;
+    private String providerRequestId;
     private String paymentUrl;
     private Map<String, String> providerPayload = new HashMap<>();
 
@@ -92,6 +93,14 @@ public class Payment {
 
     public void setTransactionRef(String transactionRef) {
         this.transactionRef = transactionRef;
+    }
+
+    public String getProviderRequestId() {
+        return providerRequestId;
+    }
+
+    public void setProviderRequestId(String providerRequestId) {
+        this.providerRequestId = providerRequestId;
     }
 
     public String getPaymentUrl() {

@@ -12,6 +12,7 @@ public record PaymentResponse(
         PaymentStatus status,
         String provider,
         String transactionRef,
+        String requestId,
         String paymentUrl
 ) {
 }

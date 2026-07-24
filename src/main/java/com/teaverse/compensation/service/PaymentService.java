@@ -1,6 +1,10 @@
 package com.teaverse.compensation.service;
 
 import com.teaverse.compensation.dto.request.CreatePaymentRequest;
+import com.teaverse.compensation.dto.request.MoMoCreatePaymentRequest;
+import com.teaverse.compensation.dto.request.MoMoPaymentResultRequest;
+import com.teaverse.compensation.dto.request.SimulatePaymentRequest;
+import com.teaverse.compensation.dto.response.MoMoCreatePaymentResponse;
 import com.teaverse.compensation.dto.response.PaymentResponse;
 import com.teaverse.compensation.exception.BadRequestException;
 import com.teaverse.compensation.exception.NotFoundException;
@@ -17,25 +21,23 @@ import com.teaverse.compensation.repository.PaymentRepository;
 import com.teaverse.compensation.repository.TournamentRegistrationRepository;
 import com.teaverse.compensation.repository.TournamentRepository;
 import com.teaverse.compensation.repository.UserRepository;
-import com.teaverse.compensation.util.VnPayUtil;
-import jakarta.servlet.http.HttpServletRequest;
+import com.teaverse.compensation.util.MoMoSignatureUtil;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.TreeMap;
+import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
 public class PaymentService {
-    private static final DateTimeFormatter VNPAY_TIME_FORMAT =
-            DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneId.of("Asia/Ho_Chi_Minh"));
+    private static final long MOMO_MIN_AMOUNT = 1_000L;
+    private static final long MOMO_MAX_AMOUNT = 50_000_000L;
+    private static final String EMPTY_EXTRA_DATA = "";
 
     private final PaymentRepository paymentRepository;
     private final TournamentRegistrationRepository registrationRepository;
@@ -44,10 +46,16 @@ public class PaymentService {
     private final CurrentUserService currentUserService;
     private final NotificationService notificationService;
     private final DtoMapper mapper;
-    private final String tmnCode;
-    private final String hashSecret;
-    private final String payUrl;
-    private final String returnUrl;
+    private final MoMoGatewayClient momoClient;
+    private final String partnerCode;
+    private final String accessKey;
+    private final String secretKey;
+    private final String redirectUrl;
+    private final String ipnUrl;
+    private final String requestType;
+    private final String lang;
+    private final boolean simulatorEnabled;
+    private final String simulatorUrl;
 
     public PaymentService(
             PaymentRepository paymentRepository,
@@ -57,10 +65,16 @@ public class PaymentService {
             CurrentUserService currentUserService,
             NotificationService notificationService,
             DtoMapper mapper,
-            @Value("${app.vnpay.tmn-code}") String tmnCode,
-            @Value("${app.vnpay.hash-secret}") String hashSecret,
-            @Value("${app.vnpay.pay-url}") String payUrl,
-            @Value("${app.vnpay.return-url}") String returnUrl
+            MoMoGatewayClient momoClient,
+            @Value("${app.momo.partner-code}") String partnerCode,
+            @Value("${app.momo.access-key}") String accessKey,
+            @Value("${app.momo.secret-key}") String secretKey,
+            @Value("${app.momo.redirect-url}") String redirectUrl,
+            @Value("${app.momo.ipn-url}") String ipnUrl,
+            @Value("${app.momo.request-type:captureWallet}") String requestType,
+            @Value("${app.momo.lang:vi}") String lang,
+            @Value("${app.momo.simulator-enabled:false}") boolean simulatorEnabled,
+            @Value("${app.momo.simulator-url:http://localhost:3000/momo-simulator}") String simulatorUrl
     ) {
         this.paymentRepository = paymentRepository;
         this.registrationRepository = registrationRepository;
@@ -69,23 +83,27 @@ public class PaymentService {
         this.currentUserService = currentUserService;
         this.notificationService = notificationService;
         this.mapper = mapper;
-        this.tmnCode = tmnCode;
-        this.hashSecret = hashSecret;
-        this.payUrl = payUrl;
-        this.returnUrl = returnUrl;
+        this.momoClient = momoClient;
+        this.partnerCode = partnerCode;
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
+        this.redirectUrl = redirectUrl;
+        this.ipnUrl = ipnUrl;
+        this.requestType = requestType;
+        this.lang = lang;
+        this.simulatorEnabled = simulatorEnabled;
+        this.simulatorUrl = simulatorUrl;
     }
 
-    public PaymentResponse createPayment(CreatePaymentRequest request, HttpServletRequest servletRequest) {
+    public PaymentResponse createPayment(CreatePaymentRequest request) {
         User user = currentUserService.getCurrentUser();
-        Payment payment = createPayment(
+        return mapper.toPaymentResponse(createPayment(
                 user,
                 request.purpose(),
                 request.referenceId(),
                 request.amount(),
-                request.orderInfo(),
-                getClientIp(servletRequest)
-        );
-        return mapper.toPaymentResponse(payment);
+                request.orderInfo()
+        ));
     }
 
     public Payment createPayment(
@@ -93,59 +111,235 @@ public class PaymentService {
             PaymentPurpose purpose,
             String referenceId,
             BigDecimal amount,
-            String orderInfo,
-            String clientIp
+            String orderInfo
     ) {
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new BadRequestException("Payment amount must be greater than or equal to zero");
+        long momoAmount = toMoMoAmount(amount);
+        String normalizedOrderInfo = normalizeOrderInfo(orderInfo);
+        String orderId = "GT-" + compactUuid();
+        String requestId = "REQ-" + compactUuid();
+        boolean simulatorMode = shouldUseSimulator();
+        if (!simulatorMode) {
+            ensureConfigured();
         }
 
         Payment payment = new Payment();
         payment.setUserId(user.getId());
         payment.setPurpose(purpose);
         payment.setReferenceId(referenceId);
-        payment.setAmount(amount);
-        payment.setTransactionRef("GT" + System.currentTimeMillis());
+        payment.setAmount(BigDecimal.valueOf(momoAmount));
+        payment.setProvider("MOMO");
+        payment.setTransactionRef(orderId);
+        payment.setProviderRequestId(requestId);
         payment = paymentRepository.save(payment);
 
-        payment.setPaymentUrl(buildPaymentUrl(payment, orderInfo, clientIp));
-        return paymentRepository.save(payment);
+        if (simulatorMode) {
+            return createSimulatorPayment(payment);
+        }
+
+        String rawSignature = MoMoSignatureUtil.createRequestData(
+                accessKey,
+                momoAmount,
+                EMPTY_EXTRA_DATA,
+                ipnUrl,
+                orderId,
+                normalizedOrderInfo,
+                partnerCode,
+                redirectUrl,
+                requestId,
+                requestType
+        );
+        MoMoCreatePaymentRequest momoRequest = new MoMoCreatePaymentRequest(
+                partnerCode,
+                requestId,
+                momoAmount,
+                orderId,
+                normalizedOrderInfo,
+                redirectUrl,
+                ipnUrl,
+                requestType,
+                EMPTY_EXTRA_DATA,
+                lang,
+                true,
+                MoMoSignatureUtil.hmacSha256(secretKey, rawSignature)
+        );
+
+        try {
+            MoMoCreatePaymentResponse momoResponse = momoClient.createPayment(momoRequest);
+            validateCreateResponse(momoRequest, momoResponse);
+            payment.setProviderPayload(toPayload(momoResponse));
+            if (momoResponse.resultCode() != 0 || isBlank(momoResponse.payUrl())) {
+                markFailed(payment, payment.getProviderPayload());
+                throw new BadRequestException("MoMo rejected the payment: " + safeMessage(momoResponse.message()));
+            }
+            payment.setPaymentUrl(momoResponse.payUrl());
+            return paymentRepository.save(payment);
+        } catch (RuntimeException ex) {
+            if (payment.getStatus() == PaymentStatus.PENDING) {
+                markFailed(payment, Map.of("error", safeMessage(ex.getMessage())));
+            }
+            throw ex;
+        }
     }
 
     public PaymentResponse getPayment(String id) {
+        User user = currentUserService.getCurrentUser();
         return paymentRepository.findById(id)
+                .filter(item -> user.getId().equals(item.getUserId()))
                 .map(mapper::toPaymentResponse)
                 .orElseThrow(() -> new NotFoundException("Payment not found"));
     }
 
-    public Map<String, String> handleVnPayCallback(Map<String, String> params) {
-        String transactionRef = params.get("vnp_TxnRef");
-        Payment payment = paymentRepository.findByTransactionRef(transactionRef)
-                .orElseThrow(() -> new NotFoundException("Payment not found"));
-
-        if (isConfiguredForRealVnPay() && !verifySignature(params)) {
-            markFailed(payment, params);
-            return Map.of("RspCode", "97", "Message", "Invalid signature");
-        }
-
-        if (isConfiguredForRealVnPay() && !hasExpectedAmount(payment, params)) {
-            markFailed(payment, params);
-            return Map.of("RspCode", "04", "Message", "Invalid payment amount");
-        }
-
-        String responseCode = params.getOrDefault("vnp_ResponseCode", "");
-        String transactionStatus = params.getOrDefault("vnp_TransactionStatus", "");
-        if ("00".equals(responseCode) && "00".equals(transactionStatus)) {
-            markPaid(payment, params);
-            return Map.of("RspCode", "00", "Message", "Confirm Success");
-        }
-
-        markFailed(payment, params);
-        return Map.of("RspCode", "00", "Message", "Payment failed");
+    public PaymentResponse handleMoMoResult(Map<String, String> params) {
+        return mapper.toPaymentResponse(processMoMoResult(parseResult(params)));
     }
 
-    private boolean hasExpectedAmount(Payment payment, Map<String, String> params) {
-        return toVnPayAmount(payment.getAmount()).equals(params.get("vnp_Amount"));
+    public void handleMoMoIpn(MoMoPaymentResultRequest request) {
+        processMoMoResult(request);
+    }
+
+    public synchronized PaymentResponse simulatePayment(String id, SimulatePaymentRequest request) {
+        if (!simulatorEnabled) {
+            throw new BadRequestException("MoMo simulator is disabled");
+        }
+        User user = currentUserService.getCurrentUser();
+        Payment payment = paymentRepository.findById(id)
+                .filter(item -> user.getId().equals(item.getUserId()))
+                .orElseThrow(() -> new NotFoundException("Payment not found"));
+        if (!"SIMULATOR".equals(payment.getProviderPayload().get("mode"))) {
+            throw new BadRequestException("Payment was not created by the MoMo simulator");
+        }
+
+        String action = request == null ? null : request.action();
+        if ("SUCCESS".equals(action)) {
+            if (payment.getStatus() == PaymentStatus.CANCELLED || payment.getStatus() == PaymentStatus.FAILED) {
+                throw new BadRequestException("A cancelled or failed payment cannot be completed");
+            }
+            Map<String, String> payload = new HashMap<>(payment.getProviderPayload());
+            payload.put("simulatedResult", "SUCCESS");
+            payload.put("completedAt", Instant.now().toString());
+            markPaid(payment, payload);
+        } else if ("CANCEL".equals(action)) {
+            if (payment.getStatus() == PaymentStatus.PAID) {
+                throw new BadRequestException("A paid payment cannot be cancelled");
+            }
+            payment.setStatus(PaymentStatus.CANCELLED);
+            Map<String, String> payload = new HashMap<>(payment.getProviderPayload());
+            payload.put("simulatedResult", "CANCEL");
+            payload.put("completedAt", Instant.now().toString());
+            payment.setProviderPayload(payload);
+            paymentRepository.save(payment);
+        } else {
+            throw new BadRequestException("Simulator action must be SUCCESS or CANCEL");
+        }
+        return mapper.toPaymentResponse(payment);
+    }
+
+    private synchronized Payment processMoMoResult(MoMoPaymentResultRequest result) {
+        ensureConfigured();
+        validateRequiredResultFields(result);
+        Payment payment = paymentRepository.findByTransactionRef(result.orderId())
+                .orElseThrow(() -> new NotFoundException("Payment not found"));
+        validatePaymentResult(payment, result);
+
+        Map<String, String> payload = toPayload(result);
+        if (result.resultCode() == 0) {
+            markPaid(payment, payload);
+        } else if (payment.getStatus() != PaymentStatus.PAID) {
+            payment.setStatus(result.resultCode() == 1006 ? PaymentStatus.CANCELLED : PaymentStatus.FAILED);
+            payment.setProviderPayload(payload);
+            paymentRepository.save(payment);
+        }
+        return payment;
+    }
+
+    private void validateCreateResponse(
+            MoMoCreatePaymentRequest request,
+            MoMoCreatePaymentResponse response
+    ) {
+        if (!partnerCode.equals(response.partnerCode())
+                || !request.orderId().equals(response.orderId())
+                || !request.requestId().equals(response.requestId())
+                || request.amount() != response.amount()) {
+            throw new BadRequestException("MoMo create-payment response does not match the request");
+        }
+        String rawSignature = MoMoSignatureUtil.createResponseData(
+                accessKey,
+                response.amount(),
+                safeValue(response.message()),
+                response.orderId(),
+                response.partnerCode(),
+                safeValue(response.payUrl()),
+                response.requestId(),
+                response.responseTime(),
+                response.resultCode()
+        );
+        String expected = MoMoSignatureUtil.hmacSha256(secretKey, rawSignature);
+        if (!MoMoSignatureUtil.matches(expected, response.signature())) {
+            throw new BadRequestException("Invalid MoMo create-payment response signature");
+        }
+    }
+
+    private void validatePaymentResult(Payment payment, MoMoPaymentResultRequest result) {
+        if (!partnerCode.equals(result.partnerCode())) {
+            throw new BadRequestException("Invalid MoMo partner code");
+        }
+        if (!result.requestId().equals(payment.getProviderRequestId())) {
+            throw new BadRequestException("Invalid MoMo request ID");
+        }
+        if (toMoMoAmount(payment.getAmount()) != result.amount()) {
+            throw new BadRequestException("Invalid MoMo payment amount");
+        }
+        String rawSignature = MoMoSignatureUtil.paymentResultData(
+                accessKey,
+                result.amount(),
+                safeValue(result.extraData()),
+                safeValue(result.message()),
+                result.orderId(),
+                safeValue(result.orderInfo()),
+                safeValue(result.orderType()),
+                result.partnerCode(),
+                safeValue(result.payType()),
+                result.requestId(),
+                result.responseTime(),
+                result.resultCode(),
+                result.transId()
+        );
+        String expected = MoMoSignatureUtil.hmacSha256(secretKey, rawSignature);
+        if (!MoMoSignatureUtil.matches(expected, result.signature())) {
+            throw new BadRequestException("Invalid MoMo payment signature");
+        }
+    }
+
+    private void validateRequiredResultFields(MoMoPaymentResultRequest result) {
+        if (result == null
+                || isBlank(result.partnerCode())
+                || isBlank(result.orderId())
+                || isBlank(result.requestId())
+                || isBlank(result.signature())) {
+            throw new BadRequestException("MoMo result data is incomplete");
+        }
+    }
+
+    private MoMoPaymentResultRequest parseResult(Map<String, String> params) {
+        try {
+            return new MoMoPaymentResultRequest(
+                    required(params, "partnerCode"),
+                    required(params, "orderId"),
+                    required(params, "requestId"),
+                    Long.parseLong(required(params, "amount")),
+                    params.getOrDefault("orderInfo", ""),
+                    params.getOrDefault("orderType", ""),
+                    Long.parseLong(params.getOrDefault("transId", "0")),
+                    Integer.parseInt(required(params, "resultCode")),
+                    params.getOrDefault("message", ""),
+                    params.getOrDefault("payType", ""),
+                    Long.parseLong(required(params, "responseTime")),
+                    params.getOrDefault("extraData", ""),
+                    required(params, "signature")
+            );
+        } catch (NumberFormatException ex) {
+            throw new BadRequestException("Invalid numeric value in MoMo result");
+        }
     }
 
     private void markFailed(Payment payment, Map<String, String> payload) {
@@ -197,61 +391,106 @@ public class PaymentService {
         }
     }
 
-    private String buildPaymentUrl(Payment payment, String orderInfo, String clientIp) {
-        if (!isConfiguredForRealVnPay()) {
-            String encodedRef = URLEncoder.encode(payment.getTransactionRef(), StandardCharsets.UTF_8);
-            return returnUrl + "?vnp_TxnRef=" + encodedRef + "&vnp_ResponseCode=00&devMode=true";
+    private Map<String, String> toPayload(MoMoCreatePaymentResponse response) {
+        Map<String, String> payload = new HashMap<>();
+        payload.put("partnerCode", safeValue(response.partnerCode()));
+        payload.put("requestId", safeValue(response.requestId()));
+        payload.put("orderId", safeValue(response.orderId()));
+        payload.put("amount", String.valueOf(response.amount()));
+        payload.put("responseTime", String.valueOf(response.responseTime()));
+        payload.put("message", safeValue(response.message()));
+        payload.put("resultCode", String.valueOf(response.resultCode()));
+        payload.put("payUrl", safeValue(response.payUrl()));
+        payload.put("deeplink", safeValue(response.deeplink()));
+        payload.put("qrCodeUrl", safeValue(response.qrCodeUrl()));
+        return payload;
+    }
+
+    private Map<String, String> toPayload(MoMoPaymentResultRequest result) {
+        Map<String, String> payload = new HashMap<>();
+        payload.put("partnerCode", safeValue(result.partnerCode()));
+        payload.put("orderId", safeValue(result.orderId()));
+        payload.put("requestId", safeValue(result.requestId()));
+        payload.put("amount", String.valueOf(result.amount()));
+        payload.put("orderInfo", safeValue(result.orderInfo()));
+        payload.put("orderType", safeValue(result.orderType()));
+        payload.put("transId", String.valueOf(result.transId()));
+        payload.put("resultCode", String.valueOf(result.resultCode()));
+        payload.put("message", safeValue(result.message()));
+        payload.put("payType", safeValue(result.payType()));
+        payload.put("responseTime", String.valueOf(result.responseTime()));
+        payload.put("extraData", safeValue(result.extraData()));
+        return payload;
+    }
+
+    private void ensureConfigured() {
+        if (isBlank(partnerCode) || isBlank(accessKey) || isBlank(secretKey)) {
+            throw new BadRequestException(
+                    "MoMo is not configured. Set MOMO_PARTNER_CODE, MOMO_ACCESS_KEY and MOMO_SECRET_KEY"
+            );
         }
-
-        Instant now = Instant.now();
-        Map<String, String> params = new TreeMap<>();
-        params.put("vnp_Version", "2.1.0");
-        params.put("vnp_Command", "pay");
-        params.put("vnp_TmnCode", tmnCode);
-        params.put("vnp_Amount", toVnPayAmount(payment.getAmount()));
-        params.put("vnp_CurrCode", "VND");
-        params.put("vnp_TxnRef", payment.getTransactionRef());
-        params.put("vnp_OrderInfo", orderInfo == null || orderInfo.isBlank() ? "GameTrust payment" : orderInfo);
-        params.put("vnp_OrderType", "other");
-        params.put("vnp_Locale", "vn");
-        params.put("vnp_ReturnUrl", returnUrl);
-        params.put("vnp_IpAddr", clientIp == null ? "127.0.0.1" : clientIp);
-        params.put("vnp_CreateDate", VNPAY_TIME_FORMAT.format(now));
-        params.put("vnp_ExpireDate", VNPAY_TIME_FORMAT.format(now.plusSeconds(900)));
-
-        String hashData = VnPayUtil.buildHashData(params);
-        String secureHash = VnPayUtil.hmacSha512(hashSecret, hashData);
-        String query = VnPayUtil.buildQuery(params);
-        return payUrl + "?" + query + "&vnp_SecureHash=" + secureHash;
     }
 
-    private boolean verifySignature(Map<String, String> params) {
-        String receivedHash = params.get("vnp_SecureHash");
-        if (receivedHash == null || receivedHash.isBlank()) {
-            return false;
+    private Payment createSimulatorPayment(Payment payment) {
+        Map<String, String> payload = new HashMap<>();
+        payload.put("mode", "SIMULATOR");
+        payload.put("provider", "MOMO");
+        payload.put("message", "Local MoMo payment simulation");
+        payment.setProviderPayload(payload);
+        String paymentId = URLEncoder.encode(payment.getId(), StandardCharsets.UTF_8);
+        payment.setPaymentUrl(simulatorUrl + "?paymentId=" + paymentId);
+        return paymentRepository.save(payment);
+    }
+
+    private boolean shouldUseSimulator() {
+        return simulatorEnabled
+                && isBlank(partnerCode)
+                && isBlank(accessKey)
+                && isBlank(secretKey);
+    }
+
+    private long toMoMoAmount(BigDecimal amount) {
+        if (amount == null) {
+            throw new BadRequestException("Payment amount is required");
         }
-        Map<String, String> signedParams = new TreeMap<>(params);
-        signedParams.remove("vnp_SecureHash");
-        signedParams.remove("vnp_SecureHashType");
-        String hashData = VnPayUtil.buildHashData(signedParams);
-        return receivedHash.equalsIgnoreCase(VnPayUtil.hmacSha512(hashSecret, hashData));
-    }
-
-    private boolean isConfiguredForRealVnPay() {
-        return tmnCode != null && !tmnCode.isBlank() && hashSecret != null && !hashSecret.isBlank();
-    }
-
-    private String toVnPayAmount(BigDecimal amount) {
-        return amount.multiply(BigDecimal.valueOf(100))
-                .setScale(0, RoundingMode.HALF_UP)
-                .toPlainString();
-    }
-
-    private String getClientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            return forwarded.split(",")[0].trim();
+        final long value;
+        try {
+            value = amount.setScale(0, RoundingMode.UNNECESSARY).longValueExact();
+        } catch (ArithmeticException ex) {
+            throw new BadRequestException("MoMo payment amount must be an integer VND value");
         }
-        return request.getRemoteAddr();
+        if (value < MOMO_MIN_AMOUNT || value > MOMO_MAX_AMOUNT) {
+            throw new BadRequestException("MoMo payment amount must be between 1,000 and 50,000,000 VND");
+        }
+        return value;
+    }
+
+    private String normalizeOrderInfo(String orderInfo) {
+        String value = isBlank(orderInfo) ? "GameTrust payment" : orderInfo.trim();
+        return value.length() <= 255 ? value : value.substring(0, 255);
+    }
+
+    private String required(Map<String, String> params, String key) {
+        String value = params.get(key);
+        if (isBlank(value)) {
+            throw new BadRequestException("Missing MoMo result field: " + key);
+        }
+        return value;
+    }
+
+    private String compactUuid() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private String safeMessage(String value) {
+        return isBlank(value) ? "Unknown payment gateway error" : value;
+    }
+
+    private String safeValue(String value) {
+        return value == null ? "" : value;
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 }

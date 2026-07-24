@@ -9,7 +9,7 @@ import java.math.BigDecimal;
 public record CreatePaymentRequest(
         @NotNull PaymentPurpose purpose,
         @NotBlank String referenceId,
-        @DecimalMin("0.0") BigDecimal amount,
+        @DecimalMin("1000") BigDecimal amount,
         String orderInfo
 ) {
 }
