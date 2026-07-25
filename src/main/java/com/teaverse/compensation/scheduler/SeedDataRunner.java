@@ -57,24 +57,29 @@ public class SeedDataRunner {
     @EventListener(ApplicationReadyEvent.class)
     public void seed() {
         try {
-            if (userRepository.count() == 0) {
+            if (userRepository.count() < 3) {
+                userRepository.deleteAll();
                 userRepository.saveAll(seedUsers());
             }
-            if (tournamentRepository.count() == 0) {
+            if (tournamentRepository.count() < 3) {
+                tournamentRepository.deleteAll();
                 tournamentRepository.saveAll(seedTournaments());
             }
-            if (clanRepository.count() == 0) {
+            if (clanRepository.count() < 3) {
+                clanRepository.deleteAll();
                 clanRepository.saveAll(seedClans());
             }
-            if (postRepository.count() == 0) {
+            if (postRepository.count() < 3) {
+                postRepository.deleteAll();
                 postRepository.saveAll(seedPosts());
             }
-            if (listingRepository.count() == 0) {
+            if (listingRepository.count() < 5) {
+                listingRepository.deleteAll();
                 listingRepository.saveAll(seedListings());
             }
-            log.info("GameTrust seed data checked successfully");
+            log.info("GameTrust seed data checked and populated successfully");
         } catch (Exception ex) {
-            log.warn("Skipping seed data because MongoDB is not ready: {}", ex.getMessage());
+            log.warn("Skipping seed data: {}", ex.getMessage());
         }
     }
 
@@ -204,9 +209,14 @@ public class SeedDataRunner {
     }
 
     private List<Listing> seedListings() {
-        Listing l1 = listing("Arena of Valor Conqueror Account", "Arena of Valor", "AS", "Conqueror", 189500, 9.6);
-        Listing l2 = listing("FreeFire Heroic Account", "FreeFire", "SEA", "Heroic", 249000, 9.8);
-        return List.of(l1, l2);
+        return List.of(
+                listing("Arena of Valor Conqueror Account - Full Champions + SGP Skin", "Arena of Valor", "AS", "Conqueror", 189500, 9.6),
+                listing("FreeFire Heroic Account - All EVO Guns Maxed", "FreeFire", "SEA", "Heroic", 249000, 9.8),
+                listing("Valorant Radiant Account - VCT Vandal & Karambit", "Valorant", "SEA", "Radiant", 1250000, 9.9),
+                listing("League of Legends Challenger Account - 150+ Skins", "League of Legends", "VN", "Challenger", 850000, 9.5),
+                listing("PUBG Mobile Grandmaster Account - Glacier M416 Max", "PUBG Mobile", "SEA", "Grandmaster", 2100000, 9.7),
+                listing("Genshin Impact AR60 Account - C6 Raiden & Signature Weapon", "Genshin Impact", "Asia", "AR60", 1800000, 9.6)
+        );
     }
 
     private Listing listing(String title, String game, String server, String rank, int price, double trust) {
@@ -217,7 +227,7 @@ public class SeedDataRunner {
         listing.setRankBadge(rank);
         listing.setPrice(BigDecimal.valueOf(price));
         listing.setTrustScore(trust);
-        listing.setDescription("Verified seller listing with trust score and safe transaction workflow.");
+        listing.setDescription("Verified seller listing with trust score, anti-smurf audit, and safe transaction workflow.");
         return listing;
     }
 }
